@@ -5,7 +5,8 @@ link2c: link2c.c
 	$(CC) $(CFLAGS) -o $@ $<
 
 install: link2c
-	install -Dm755 link2c $(PREFIX)/bin/link2c
+	install -Dm755 link2c         $(PREFIX)/bin/link2c
+	install -Dm755 link2c-recover $(PREFIX)/bin/link2c-recover
 
 clean:
 	rm -f link2c

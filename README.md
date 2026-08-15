@@ -12,17 +12,19 @@ Native Linux control for the Insta360 Link 2C webcam, which ships only with a Wi
 - **Modes:** off, AI tracking, whiteboard, overhead and DeskView
 - **Framing:** head, half body or full body
 - **Raw access:** dump every extension unit selector, read and write single ones
+- **Recovery:** `link2c-recover` brings the camera back from firmware-update mode without unplugging it
 
 ## Requirements
 
 - a C compiler and `make`
+- `udisks2`, `usbutils` and `util-linux` for `link2c-recover`
 
 No root is needed: the tools only open the video device, which systemd-logind grants to the logged-in user. Without logind, add yourself to the `video` group.
 
 ## Running
 
 ```bash
-make install            # link2c to ~/.local/bin
+make install            # link2c, link2c-recover to ~/.local/bin
 
 link2c scan
 link2c info
@@ -30,6 +32,10 @@ link2c mode deskview
 ```
 
 The device defaults to `/dev/v4l/by-id/usb-Insta360_Insta360_Link_2C-video-index0`; override it with `LINK_DEV`.
+
+## Safety
+
+Two writes switch the camera into Ambarella firmware-update mode: unit 9 selector 17 and unit 10 selector 9. `link2c` refuses them without `--force`.
 
 ## Disclaimer
 

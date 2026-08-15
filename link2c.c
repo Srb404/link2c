@@ -16,6 +16,12 @@
  * 0xff on read-back means the camera declined the mode. Streaming, that only
  * happens for tracking, which wants a person in frame before it will engage.
  *
+ * DANGEROUS: two writes drop the camera off USB and bring it back as an
+ * Ambarella A9 mass-storage device (firmware-update mode): unit 9 selector 17
+ * (any non-zero value) and unit 10 selector 9 = 0x02. Both are refused below
+ * unless --force is given; link2c-recover brings the camera back without a
+ * replug.
+ *
  * The 2C's XU GUIDs differ from the Link 1/2, so the selector map below was
  * inherited from the community Link 1/2 work and re-checked here. Confirmed
  * on this camera: off, deskview, overhead (accepted and held),
@@ -60,9 +66,29 @@ static int xu_len(int fd, __u8 unit, __u8 sel)
     return l[0] | (l[1] << 8);
 }
 
+static int force_writes = 0;
+
+/* Selectors that do something other than what a control panel wants. */
+static int is_dangerous(__u8 unit, __u8 sel)
+{
+    /* Both of these drop the camera off USB into firmware-update mode.
+       Found by sweeping one-byte selectors; recovery needs link2c-recover. */
+    if (unit == 9  && sel == 17) return 1;
+    if (unit == 10 && sel == 9)  return 1;
+    return 0;
+}
+
 /* Writes are always the selector's full length, zero-padded. */
 static int xu_set(int fd, __u8 unit, __u8 sel, const unsigned char *val, int nval)
 {
+    if (is_dangerous(unit, sel) && !force_writes) {
+        fprintf(stderr,
+                "refusing to write unit %d selector %d: this drops the camera off USB\n"
+                "into firmware-update mode. Run link2c-recover to bring it back.\n"
+                "Pass --force if you really mean it.\n",
+                unit, sel);
+        return -1;
+    }
     int len = xu_len(fd, unit, sel);
     if (len <= 0) { fprintf(stderr, "unit %d sel %d: no such control\n", unit, sel); return -1; }
     unsigned char *buf = calloc(1, len);
@@ -193,7 +219,10 @@ static void usage(const char *p)
       "  scan                    dump every XU selector (length, access, value)\n"
       "  get <unit> <sel>        read one selector\n"
       "  set <unit> <sel> <hex>  write one selector, zero-padded to its length\n"
-      "\n"
+      "  --force                 permit writes to selectors known to be unsafe\n\n"
+      "Unit 9 selector 17 and unit 10 selector 9 switch the camera into\n"
+      "firmware-update mode; both are refused without --force.\n"
+      "link2c-recover undoes it.\n\n"
       "Modes only take effect while something streams from the camera.\n"
       "Zoom and pan/tilt are ordinary V4L2 controls - use v4l2-ctl; pan/tilt\n"
       "only moves the image once zoom_absolute is above 100.\n", p);
@@ -204,6 +233,13 @@ int main(int argc, char **argv)
     const char *e = getenv("LINK_DEV");
     if (e) dev_path = e;
 
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--force")) continue;
+        force_writes = 1;
+        for (int j = i; j < argc - 1; j++) argv[j] = argv[j + 1];
+        argc--;
+        break;
+    }
     if (argc < 2) { usage(argv[0]); return 2; }
 
     int fd = open(dev_path, O_RDWR);

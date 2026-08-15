@@ -1,0 +1,17 @@
+#!/bin/bash
+# Bring the Link 2C back from Ambarella firmware-update mode without unplugging.
+# udisksctl power-off cycles the port, and the camera re-enumerates as UVC.
+DEV=$(lsblk -ndo NAME,VENDOR | awk '/Ambarell/ {print "/dev/"$1; exit}')
+if [ -z "$DEV" ]; then
+    lsusb -d 2e1a:4c03 >/dev/null 2>&1 && { echo "camera is already in UVC mode"; exit 0; }
+    echo "camera not found in UVC or firmware-update mode"; exit 1
+fi
+echo "firmware-update mode on $DEV, power-cycling the port..."
+udisksctl power-off -b "$DEV" || exit 1
+for i in $(seq 1 20); do
+    sleep 1
+    if lsusb -d 2e1a:4c03 >/dev/null 2>&1 && [ -e /dev/v4l/by-id/usb-Insta360_Insta360_Link_2C-video-index0 ]; then
+        echo "camera back after ${i}s"; exit 0
+    fi
+done
+echo "not back within 20 s, unplug and replug it"; exit 1
