@@ -37,6 +37,10 @@ The device defaults to `/dev/v4l/by-id/usb-Insta360_Insta360_Link_2C-video-index
 
 Two writes switch the camera into Ambarella firmware-update mode: unit 9 selector 17 and unit 10 selector 9. `link2c` refuses them without `--force`.
 
+## Notes
+
+`research/` keeps the scripts used to work out the protocol.
+
 ## Disclaimer
 
 This is an unofficial tool, not affiliated with or endorsed by Insta360. It writes undocumented vendor controls; some of them put the camera into firmware-update mode. Use it at your own risk.
