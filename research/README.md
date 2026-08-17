@@ -4,6 +4,7 @@ Scripts used to work out the XU protocol. They are not needed for everyday use o
 
 - `flipcheck.py <frames_dir> <phases_file>`: detects whether any test phase flipped the image (horizontal or vertical mirror, 180° rotation) against the reference frame
 - `flip2.sh`: selector sweep with a watchdog that checks after every write that the camera is still on USB
+- `bits.sh`: toggles each bit of the feature mask in unit 9 selector 27 in turn
 
 Phases file format: `<frame_number> <unit> <selector> <value>`, with the first line `<number> BASE - -`.
 

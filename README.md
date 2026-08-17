@@ -3,7 +3,7 @@
 ![C](https://img.shields.io/badge/C-UVC%20XU-A8B9CC?logo=c&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-V4L2-FCC624?logo=linux&logoColor=black)
 
-Native Linux control for the Insta360 Link 2C webcam, which ships only with a Windows and macOS app. The camera's AI features sit behind UVC extension units, reached here with `UVCIOC_CTRL_QUERY`.
+Native Linux control for the Insta360 Link 2C webcam, which ships only with a Windows and macOS app. The camera's AI features sit behind UVC extension units; their selectors were mapped by reading the vendor's Windows controller (strings, RTTI vtables) instead of blindly sweeping values.
 
 ---
 
@@ -11,6 +11,7 @@ Native Linux control for the Insta360 Link 2C webcam, which ships only with a Wi
 
 - **Modes:** off, AI tracking, whiteboard, overhead and DeskView
 - **Framing:** head, half body or full body
+- **Mirror:** horizontal and vertical, done by the camera itself, so it applies in every app
 - **Raw access:** dump every extension unit selector, read and write single ones
 - **Recovery:** `link2c-recover` brings the camera back from firmware-update mode without unplugging it
 
@@ -29,13 +30,14 @@ make install            # link2c, link2c-recover to ~/.local/bin
 link2c scan
 link2c info
 link2c mode deskview
+link2c mirror h on
 ```
 
 The device defaults to `/dev/v4l/by-id/usb-Insta360_Insta360_Link_2C-video-index0`; override it with `LINK_DEV`.
 
 ## Safety
 
-Two writes switch the camera into Ambarella firmware-update mode: unit 9 selector 17 and unit 10 selector 9. `link2c` refuses them without `--force`.
+Three writes switch the camera into Ambarella firmware-update mode: unit 9 selector 17, unit 10 selector 9 and bit 5 of unit 9 selector 27. `link2c` refuses them without `--force`.
 
 ## Notes
 
