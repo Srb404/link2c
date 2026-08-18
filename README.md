@@ -46,7 +46,7 @@ Three writes switch the camera into Ambarella firmware-update mode: unit 9 selec
 
 ## Notes
 
-`research/` keeps the scripts used to work out the protocol.
+`NOTES.md` holds the selector map and the reverse-engineering method. `research/` keeps the scripts used to work out the protocol.
 
 ## Disclaimer
 
