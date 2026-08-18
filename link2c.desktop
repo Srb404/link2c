@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Insta360 Link 2C
+GenericName=Webcam Control
+Comment=Modes, framing and image settings for the Insta360 Link 2C
+Exec=link2c-gui
+Icon=camera-web
+Terminal=false
+Categories=AudioVideo;Video;
+Keywords=webcam;camera;insta360;link;
