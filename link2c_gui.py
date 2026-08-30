@@ -42,12 +42,39 @@ PRESET_CTRLS = {
     "power_line_frequency", "focus_automatic_continuous", "focus_absolute",
 }
 POWER_LINE = [(1, "50_hz", "50 Hz"), (2, "60_hz", "60 Hz"), (0, "disabled", "Off")]
+# Heights the preview pipe may run at; it picks the first one that covers
+# the widget's real (scale-factor aware) size, so the picture is not upscaled.
+PREVIEW_STEPS = (360, 540, 720, 900, 1080)
+
 MODES = [
     ("off", "Normal", "No processing"),
     ("track", "AI tracking", "Keeps the person in frame"),
     ("deskview", "DeskView", "Desk view with perspective correction"),
     ("overhead", "Overhead", "Document view"),
 ]
+
+def list_formats(dev):
+    """Parse v4l2-ctl into {fourcc: {(w, h): [fps, ...]}} of what the camera offers."""
+    ok, out = run(["v4l2-ctl", "-d", dev, "--list-formats-ext"])
+    if not ok:
+        return {}
+    formats, fourcc, size = {}, None, None
+    for line in out.splitlines():
+        m = re.search(r"\]:\s*'(\w+)'", line)
+        if m:
+            fourcc = m.group(1)
+            formats[fourcc] = {}
+            continue
+        m = re.search(r"Size:\s*Discrete\s*(\d+)x(\d+)", line)
+        if m and fourcc:
+            size = (int(m.group(1)), int(m.group(2)))
+            formats[fourcc][size] = []
+            continue
+        m = re.search(r"\(([\d.]+)\s*fps\)", line)
+        if m and fourcc and size:
+            formats[fourcc][size].append(int(float(m.group(1))))
+    return formats
+
 
 def save_preset(values):
     """Write image controls into the cameractrls preset, keeping the rest."""
@@ -123,51 +150,149 @@ class V4L2:
 
 
 class Preview(Gtk.Picture):
-    """Live view, fed by a raw-RGB ffmpeg pipe running in a worker thread."""
+    """Live view, fed by a raw-RGB ffmpeg pipe running in a worker thread.
 
-    W, H = 640, 360
+    The pipe decodes at the height the widget really occupies in physical
+    pixels, snapped to a few steps so that resizing rarely costs a stream
+    restart, and it runs at the camera's own frame rate: a fixed small
+    preview looked soft on a scaled screen and a capped one looked jerky.
+    """
 
     def __init__(self, dev, on_state):
         super().__init__()
         self.dev = dev
         self.on_state = on_state
+        self.fourcc = "MJPG"
+        self.size = (1920, 1080)
+        self.fps = 30
         self.set_content_fit(Gtk.ContentFit.CONTAIN)
         self.set_hexpand(True)
         self.set_vexpand(True)
         self.proc = None
+        self.thread = None
         self.running = False
+        self.out = (640, 360)      # what the pipe is producing right now
+        self._want_h = PREVIEW_STEPS[0]
+        self.wanted = False        # what the user asked for, vs. running = the pipe
+        self._restart_id = 0
+        self._pending = None       # newest frame waiting for the UI thread
+        self._lock = threading.Lock()
+
+    def set_format(self, fourcc, size, fps):
+        """Re-open the stream with a new format; a running preview is restarted."""
+        self.fourcc, self.size, self.fps = fourcc, size, fps
+        # A new aspect or sensor mode can want a different step, and no
+        # re-allocation follows a format change to recompute it for us.
+        self._want_h = self._wanted_h(self.get_width(), self.get_height())
+        # Picking a format walks the resolution and fps rows too, so this
+        # arrives in bursts; reopen once, for the combination it lands on.
+        self._later_restart()
+
+    def _scale(self):
+        """Real device scale - get_scale_factor() rounds 1.5 up to 2 and would
+        make the preview ask for a third more pixels than the screen shows."""
+        surface = self.get_native() and self.get_native().get_surface()
+        return (surface.get_scale() if surface else 0) or self.get_scale_factor() or 1
+
+    def _wanted_h(self, width, height):
+        """Smallest step that still covers the allocation, capped by the source."""
+        w, h = self.size
+        # CONTAIN letterboxes, so the picture is the smaller of the two fits.
+        shown = min(height, width * h / w) * self._scale()
+        return min(next((s for s in PREVIEW_STEPS if s >= shown),
+                        PREVIEW_STEPS[-1]), h)
+
+    def do_measure(self, orientation, for_size):
+        """Ask for a fixed size, never for the paintable's.
+
+        Gtk.Picture normally measures its paintable, which here would feed the
+        stream size back into the layout: a taller stream is a wider picture,
+        a wider picture wins width from the side panel, and the wider slot asks
+        for a taller stream again - the camera reopens in a loop. The widget
+        expands, so it still fills whatever the window leaves it.
+        """
+        if orientation == Gtk.Orientation.HORIZONTAL:
+            return 320, 640, -1, -1
+        return 180, 360, -1, -1
+
+    def do_size_allocate(self, width, height, baseline):
+        Gtk.Picture.do_size_allocate(self, width, height, baseline)
+        want = self._wanted_h(width, height)
+        if want == self._want_h:
+            return
+        self._want_h = want
+        self._later_restart()
+
+    def _later_restart(self):
+        """Mapping a window and dragging its edge each fire a burst of
+        allocations; only the size it settles on should reopen the camera."""
+        if self._restart_id:
+            GLib.source_remove(self._restart_id)
+        self._restart_id = GLib.timeout_add(400, self._restart_now)
+
+    def _restart_now(self):
+        self._restart_id = 0
+        if self.wanted:
+            self.restart()
+        return False
 
     def start(self):
-        if self.running:
+        """Ask for the preview. It opens once the widget has settled on a size,
+        which is not before __init__ returns, so this can run early."""
+        self.wanted = True
+        if self.running or self._restart_id or not self.get_height():
             return
-        self.running = True
-        threading.Thread(target=self._pump, daemon=True).start()
+        self._open()
 
     def stop(self):
+        self.wanted = False
         self._close()
         self.set_paintable(None)
         self.on_state(False, "preview off")
 
     def restart(self):
-        """Bounce the pipe - mirror only takes on a fresh stream."""
-        if self.running:
+        """Bounce the pipe - mirror, format and size only take on a fresh one."""
+        if self.wanted:
             self._close()
-            self.start()
+            self._open()
+
+    def _open(self):
+        self.running = True
+        self.thread = threading.Thread(target=self._pump, daemon=True)
+        self.thread.start()
 
     def _close(self):
         self.running = False
-        if self.proc:
-            self.proc.kill()
-            self.proc = None
+        proc, self.proc = self.proc, None
+        if proc:
+            proc.kill()
+            try:
+                # The camera stays busy until the pipe is reaped, so the reopen
+                # has to wait for it - but never hang the UI on a wedged USB.
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+        thread, self.thread = self.thread, None
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout=1)
+        with self._lock:
+            self._pending = None
 
     def _pump(self):
+        w, h = self.size
+        ph = min(self._want_h, h)
+        pw = max(2, int(round(w * ph / h)) & ~1)   # keep the source aspect
+        self.out = (pw, ph)
         cmd = [
             "ffmpeg", "-nostdin", "-loglevel", "error",
-            "-f", "v4l2", "-input_format", "mjpeg",
-            "-video_size", "1920x1080",
+            "-fflags", "nobuffer", "-flags", "low_delay",
+            "-f", "v4l2",
+            "-input_format", "h264" if self.fourcc == "H264" else "mjpeg",
+            "-video_size", f"{w}x{h}",
+            "-framerate", str(self.fps),
             "-i", self.dev,
-            "-r", "15",
-            "-vf", f"scale={self.W}:{self.H}",
+            "-fps_mode", "passthrough",
+            "-vf", f"scale={pw}:{ph}",
             "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
         ]
         try:
@@ -178,7 +303,7 @@ class Preview(Gtk.Picture):
             self.running = False
             return
 
-        nbytes = self.W * self.H * 3
+        nbytes = pw * ph * 3
         first = True
         while self.running:
             buf = self.proc.stdout.read(nbytes)
@@ -187,7 +312,13 @@ class Preview(Gtk.Picture):
             if first:
                 first = False
                 GLib.idle_add(self.on_state, True, "preview running")
-            GLib.idle_add(self._show, buf)
+            with self._lock:
+                waiting = self._pending is not None
+                self._pending = buf
+            # A frame still waiting means the UI thread is behind; drop that
+            # one rather than queue latency the viewer would see as lag.
+            if not waiting:
+                GLib.idle_add(self._show, priority=GLib.PRIORITY_DEFAULT)
 
         if self.running:  # ended on its own - the device is busy or gone
             err = ""
@@ -198,9 +329,14 @@ class Preview(Gtk.Picture):
             GLib.idle_add(self.on_state, False, msg)
         self.running = False
 
-    def _show(self, buf):
+    def _show(self):
+        with self._lock:
+            buf, self._pending = self._pending, None
+        pw, ph = self.out
+        if buf is None or len(buf) != pw * ph * 3:   # a restart raced us
+            return False
         self.set_paintable(Gdk.MemoryTexture.new(
-            self.W, self.H, Gdk.MemoryFormat.R8G8B8, GLib.Bytes.new(buf), self.W * 3))
+            pw, ph, Gdk.MemoryFormat.R8G8B8, GLib.Bytes.new(buf), pw * 3))
         return False
 
 
@@ -209,6 +345,7 @@ class Window(Adw.ApplicationWindow):
         super().__init__(application=app, title="Insta360 Link 2C")
         self.set_default_size(1080, 660)
         self.v4l2 = V4L2(DEV)
+        self.formats = list_formats(DEV)
         self.busy = False
         self.streaming = False
         self._base_status = "starting preview…"
@@ -260,6 +397,7 @@ class Window(Adw.ApplicationWindow):
         split.append(scroller)
 
         panel.append(self._build_modes())
+        panel.append(self._build_stream())
         panel.append(self._build_mirror())
         panel.append(self._build_view())
         panel.append(self._build_image())
@@ -331,6 +469,98 @@ class Window(Adw.ApplicationWindow):
         # The camera only picks this up when a stream starts, so cycle ours.
         self.preview.restart()
         return False
+
+    def _build_stream(self):
+        g = self._group(
+            "Stream",
+            "Applies to the preview, other apps negotiate their own format")
+        self._stream_ready = False
+
+        self.fmt_row = Adw.ComboRow(title="Format")
+        self.fmt_row.set_model(Gtk.StringList.new(list(self.formats) or ["—"]))
+        self.fmt_row.connect("notify::selected", self.on_format_changed)
+        g.add(self.fmt_row)
+
+        self.res_row = Adw.ComboRow(title="Resolution")
+        self.res_row.connect("notify::selected", self.on_res_changed)
+        g.add(self.res_row)
+
+        self.fps_row = Adw.ComboRow(title="Frame rate")
+        self.fps_row.connect("notify::selected", self.on_fps_changed)
+        g.add(self.fps_row)
+
+        if not self.formats:
+            for row in (self.fmt_row, self.res_row, self.fps_row):
+                row.set_sensitive(False)
+            self.fmt_row.set_subtitle("could not read from the camera")
+            return g
+
+        # Default to 1080p30 MJPEG when the camera offers it.
+        if "MJPG" in self.formats:
+            self.fmt_row.set_selected(list(self.formats).index("MJPG"))
+        self.rebuild_resolutions(prefer=(1920, 1080))
+        self._stream_ready = True
+        return g
+
+    def current_fourcc(self):
+        names = list(self.formats)
+        idx = self.fmt_row.get_selected()
+        return names[idx] if 0 <= idx < len(names) else None
+
+    def rebuild_resolutions(self, prefer=None):
+        fourcc = self.current_fourcc()
+        if not fourcc:
+            return
+        self.sizes = sorted(self.formats[fourcc], key=lambda s: s[0] * s[1])
+        labels = [f"{w}×{h}" for w, h in self.sizes]
+        self.res_row.handler_block_by_func(self.on_res_changed)
+        self.res_row.set_model(Gtk.StringList.new(labels))
+        pick = self.sizes.index(prefer) if prefer in self.sizes else len(self.sizes) - 1
+        self.res_row.set_selected(pick)
+        self.res_row.handler_unblock_by_func(self.on_res_changed)
+        self.rebuild_fps(prefer=30)
+
+    def rebuild_fps(self, prefer=None):
+        fourcc = self.current_fourcc()
+        if not fourcc:
+            return
+        size = self.sizes[self.res_row.get_selected()]
+        self.fpses = sorted(self.formats[fourcc][size], reverse=True)
+        self.fps_row.handler_block_by_func(self.on_fps_changed)
+        self.fps_row.set_model(Gtk.StringList.new([str(f) for f in self.fpses]))
+        pick = self.fpses.index(prefer) if prefer in self.fpses else 0
+        self.fps_row.set_selected(pick)
+        self.fps_row.handler_unblock_by_func(self.on_fps_changed)
+        # 4K tops out below 60, so say why the choice shrank.
+        self.fps_row.set_subtitle(
+            "" if len(self.fpses) > 3 else "this resolution limits the frame rate")
+
+    def on_format_changed(self, *_a):
+        if not getattr(self, "_stream_ready", False):
+            return
+        self.rebuild_resolutions(prefer=(1920, 1080))
+        self.apply_stream()
+
+    def on_res_changed(self, *_a):
+        if not getattr(self, "_stream_ready", False):
+            return
+        self.rebuild_fps(prefer=30)
+        self.apply_stream()
+
+    def on_fps_changed(self, *_a):
+        if not getattr(self, "_stream_ready", False):
+            return
+        self.apply_stream()
+
+    def apply_stream(self):
+        fourcc = self.current_fourcc()
+        if not fourcc:
+            return
+        size = self.sizes[self.res_row.get_selected()]
+        fps = self.fpses[self.fps_row.get_selected()]
+        self._base_status = f"stream: {fourcc} {size[0]}×{size[1]} @ {fps} fps"
+        self.status.set_label(self._base_status)
+        self.preview.set_format(fourcc, size, fps)
 
     def _build_view(self):
         g = self._group("View")

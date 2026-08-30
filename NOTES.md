@@ -156,9 +156,45 @@ selectors.
 ## GUI preview
 
 ```
-camera (MJPEG 1080p) → ffmpeg → scale to 640×360 at 15 fps → raw rgb24 pipe → Gdk.MemoryTexture
+camera (MJPEG/H264) → ffmpeg → scale → raw rgb24 pipe → Gdk.MemoryTexture
 ```
 
-GStreamer's `v4l2src` would need `gst-plugins-good`, and OpenCV is a heavy
-dependency for one picture, so the preview is a plain `ffmpeg` pipe read in a
-worker thread. Each frame becomes a `Gdk.MemoryTexture` on the UI thread.
+The first version decoded a fixed 640×360 at 15 fps, which gave 12.6 fps and an
+upscaled image. Now:
+
+- **Resolution follows the widget.** The pipe picks the smallest of
+  `PREVIEW_STEPS = (360, 540, 720, 900, 1080)` that covers the widget in physical
+  pixels, capped at the source height. Width follows the source aspect, so 4:3
+  modes are not stretched.
+- **Real scale factor.** `get_scale_factor()` rounds 1.5 up to 2 and would decode
+  a third more pixels than shown; `Gdk.Surface.get_scale()` gives the real one.
+- **No frame cap.** `-fps_mode passthrough` with `-fflags nobuffer -flags
+  low_delay` runs at the camera's own rate.
+- **Drop, do not queue.** A frame still waiting for the UI thread is replaced by
+  the next one, so latency cannot pile up. `idle_add` runs at
+  `PRIORITY_DEFAULT`, above GTK's redraw.
+
+### Pitfalls
+
+1. **Layout feedback loop.** `Gtk.Picture` measures its paintable, so a bigger
+   stream made a wider picture, which took space from the panel and asked for a
+   bigger stream again; the camera reopened every ~570 ms. `do_measure` now
+   returns fixed sizes.
+2. **Restart racing a busy device.** `proc.kill()` without `wait()` left the
+   camera busy and the next `ffmpeg` failed with `Device or resource busy`.
+   `_close()` reaps the process, with a timeout so a wedged USB cannot freeze
+   the UI.
+3. **Restart storm on startup.** The compositor tiles the window after mapping
+   it, and a format change walks three rows. One 400 ms debounce covers all of
+   it, and `start()` waits for the first allocation.
+
+### Performance
+
+Measured on a Ryzen 7 5700X:
+
+| Stream | Drawn | Dropped | `ffmpeg` CPU |
+|---|---|---|---|
+| 1280×720 @ 60 | 59.9 fps | 0 | ~107 % of one core |
+| 1920×1080 @ 60 | 60 fps | | 375 MB/s through the pipe |
+
+Drawing a frame (`_show`) costs 0.3 ms.
