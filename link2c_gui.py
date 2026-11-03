@@ -53,6 +53,10 @@ MODES = [
     ("overhead", "Overhead", "Document view"),
 ]
 
+FRAMINGS = [("head", "Head"), ("half", "Half body"), ("full", "Full body")]
+SPEEDS = [("fast", "Fast"), ("normal", "Normal"), ("slow", "Slow")]
+
+
 def list_formats(dev):
     """Parse v4l2-ctl into {fourcc: {(w, h): [fps, ...]}} of what the camera offers."""
     ok, out = run(["v4l2-ctl", "-d", dev, "--list-formats-ext"])
@@ -351,6 +355,7 @@ class Window(Adw.ApplicationWindow):
         self._base_status = "starting preview…"
         self._pending = {}
         self.auto_rows = {}
+        self.feature_rows = {}
         self._syncing = False
         self.mode_key = None
 
@@ -397,6 +402,7 @@ class Window(Adw.ApplicationWindow):
         split.append(scroller)
 
         panel.append(self._build_modes())
+        panel.append(self._build_tracking())
         panel.append(self._build_stream())
         panel.append(self._build_mirror())
         panel.append(self._build_view())
@@ -434,6 +440,50 @@ class Window(Adw.ApplicationWindow):
             self.mode_rows[key] = (row, check)
         return g
 
+    def _build_tracking(self):
+        g = self._group("Tracking")
+        self._feature_row(g, "autoframe", "Auto framing")
+        self.framing_row = Adw.ComboRow(title="Framing")
+        self.framing_row.set_model(
+            Gtk.StringList.new([label for _, label in FRAMINGS]))
+        self.framing_row.connect("notify::selected", self.on_framing_changed)
+        g.add(self.framing_row)
+        self.speed_row = Adw.ComboRow(title="Speed")
+        self.speed_row.set_model(
+            Gtk.StringList.new([label for _, label in SPEEDS]))
+        self.speed_row.connect("notify::selected", self.on_speed_changed)
+        g.add(self.speed_row)
+        self._feature_row(g, "smart", "Smart adjustment")
+        return g
+
+    def _feature_row(self, group, name, title):
+        """A switch backed by `link2c feature <name>` (or `level`)."""
+        row = Adw.SwitchRow(title=title)
+        row.connect("notify::active", self.on_feature, name)
+        group.add(row)
+        self.feature_rows[name] = row
+        return row
+
+    def on_feature(self, row, _param, name):
+        if self._syncing:
+            return
+        state = "on" if row.get_active() else "off"
+        cmd = ["link2c", "level", state] if name == "level" else \
+              ["link2c", "feature", name, state]
+        self.update_framing_sensitivity()
+
+        def done(ok, _out):
+            if not ok:
+                self._base_status = f"could not switch: {row.get_title()}"
+                self.status.set_label(self._base_status)
+                self.refresh_state()
+        run_bg(cmd, done)
+
+    def on_speed_changed(self, row, _param):
+        if self._syncing:
+            return
+        run_bg(["link2c", "speed", SPEEDS[row.get_selected()][0]])
+
     def _build_mirror(self):
         g = self._group(
             "Orientation",
@@ -444,6 +494,7 @@ class Window(Adw.ApplicationWindow):
             row.connect("notify::active", self.on_mirror, axis)
             g.add(row)
             self.mirror_rows[axis] = row
+        self._feature_row(g, "level", "Horizontal correction")
         return g
 
     def on_mirror(self, row, _param, axis):
@@ -588,6 +639,7 @@ class Window(Adw.ApplicationWindow):
             ("Sharpness", "sharpness"),
         ]:
             self._slider_row(g, title, name)
+        self._feature_row(g, "hdr", "HDR")
 
         self.wb_temp_row = None
         if self.v4l2.has("white_balance_automatic"):
@@ -676,10 +728,15 @@ class Window(Adw.ApplicationWindow):
         live = self.streaming
         for row, _check in self.mode_rows.values():
             row.set_sensitive(live)
+        self.update_framing_sensitivity()
         text = self._base_status
         if not live:
             text += "  ·  modes need a stream (turn the preview on)"
         self.status.set_label(text)
+
+    def update_framing_sensitivity(self):
+        """The camera ignores the framing choice unless auto framing is on."""
+        self.framing_row.set_sensitive(self.feature_rows["autoframe"].get_active())
 
     def _select_mode(self, key):
         """Tick a mode row without it firing a camera write."""
@@ -711,6 +768,7 @@ class Window(Adw.ApplicationWindow):
             self.mode_key = key
             self._base_status = f"mode: {key}"
             self.status.set_label(self._base_status)
+            self.update_framing_sensitivity()
         else:
             hint = ""
             if key == "track" and "0xff" in out:
@@ -721,6 +779,17 @@ class Window(Adw.ApplicationWindow):
             self.status.set_label(self._base_status)
             self.refresh_state()
         return False
+
+    def on_framing_changed(self, row, _param):
+        if self.busy:
+            return
+        key, label = FRAMINGS[row.get_selected()]
+
+        def done(ok, _out):
+            self._base_status = (f"framing: {label.lower()}" if ok
+                                 else "could not change framing")
+            self.status.set_label(self._base_status)
+        run_bg(["link2c", "framing", key], done)
 
     def on_slider(self, scale, ctrl, label, fmt):
         value = int(scale.get_value())
@@ -795,17 +864,36 @@ class Window(Adw.ApplicationWindow):
         if m and m.group(1) in self.mode_rows:
             self.mode_key = m.group(1)
             self._select_mode(self.mode_key)
+        m = re.search(r"^framing\s*:\s*(\w+)", out, re.MULTILINE)
+        if m:
+            for i, (key, _) in enumerate(FRAMINGS):
+                if key == m.group(1):
+                    self.framing_row.handler_block_by_func(self.on_framing_changed)
+                    self.framing_row.set_selected(i)
+                    self.framing_row.handler_unblock_by_func(self.on_framing_changed)
         m = re.search(r"^mirror\s*:\s*h=(\w+)\s+v=(\w+)", out, re.MULTILINE)
         self._syncing = True
         if m:
             self.mirror_rows["h"].set_active(m.group(1) == "on")
             self.mirror_rows["v"].set_active(m.group(2) == "on")
+        m = re.search(r"^flags\s*:(.*)$", out, re.MULTILINE)
+        for name, state in re.findall(r"([\w-]+)=(on|off)", m.group(1) if m else ""):
+            if name in self.feature_rows:
+                self.feature_rows[name].set_active(state == "on")
+        m = re.search(r"^level\s*:\s*(on|off)", out, re.MULTILINE)
+        if m:
+            self.feature_rows["level"].set_active(m.group(1) == "on")
+        m = re.search(r"^speed\s*:\s*(\w+)", out, re.MULTILINE)
+        keys = [k for k, _ in SPEEDS]
+        if m and m.group(1) in keys:
+            self.speed_row.set_selected(keys.index(m.group(1)))
         self._syncing = False
         m = re.search(r"^serial\s*:\s*(\S+)", out, re.MULTILINE)
         if m:
             self.set_title(f"Insta360 Link 2C — {m.group(1)}")
         if self.zoom_row:
             self.update_pan_hint(int(self.zoom_row.scale.get_value()))
+        self.update_framing_sensitivity()
         return False
 
 

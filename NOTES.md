@@ -16,6 +16,7 @@ tools in this repository rely on.
 - [Extension unit map](#extension-unit-map)
 - [Dangerous writes](#dangerous-writes)
 - [Reverse engineering](#reverse-engineering)
+- [AI tracking](#ai-tracking)
 - [GUI preview](#gui-preview)
 
 ## Ground rules
@@ -38,14 +39,15 @@ selector map carries over from them.
 
 | Selector | Size | Meaning | Status |
 |---:|---|---|---|
-| 2 | 61 B | mode: byte 0 id, byte 1 flag, see [Modes](#modes) | confirmed |
+| 2 | 61 B | mode, see [Mode struct](#mode-struct) | confirmed |
 | 11 | 5 B, GET | tracking state (the vendor app only reads it) | |
 | 12 | 32 B | serial number, ASCII | confirmed |
 | 13 | 129 B | relative pan/tilt (from Link/Link 2) | untested |
 | 14 | 1 B, SET | reset framing | accepted, no visible effect (no gimbal) |
 | 17 | | **firmware-update switch** | [never write](#dangerous-writes) |
-| 19 | 1 B | framing: `01` head, `02` half body, `03` full body | accepted, no visible effect yet |
-| 27 | 2 B | feature bitmask, see [below](#feature-bitmask) | partly mapped |
+| 18 | 1 B | tracking speed: `00` fast, `01` normal, `02` slow | confirmed |
+| 19 | 1 B | framing: `01` head, `02` half body, `03` full body | confirmed, needs bit 0 of selector 27 |
+| 27 | 2 B | feature bitmask, see [below](#feature-bitmask) | confirmed |
 
 ### Unit 10
 
@@ -54,36 +56,53 @@ selector map carries over from them.
 | 1 | 8 B, GET | tracking target on Link/Link 2 | read-only on the 2C |
 | 9 | | **firmware-update switch** (`02`) | [never write](#dangerous-writes) |
 | 15 | 2 B | privacy (gimbal down) | no effect, always reads `02 00` |
+| 26 | 1 B | tracking: `00` single, `01` group | does not stick without a tracking stream |
+| 28 | 25 B | horizontal correction, byte 0 = `0`/`1` | confirmed |
 
 ### Feature bitmask
 
-Unit 9 selector 27. Only three bits are known so far; the rest belong to
-features the vendor app toggles through the same call.
+Unit 9 selector 27. Bit numbers come from the `mov edx, N` before each
+`setExtendFunc` call in the vendor app.
 
 | Bit | Feature |
 |---:|---|
+| 0 | Auto Framing (AI zoom); framing does nothing without it |
+| 2 | HDR |
 | 3 | horizontal mirror |
 | 5 | **firmware-update mode, [never set](#dangerous-writes)** |
+| 6 | keep settings across power cycles ("Set as default") |
+| 7 | one-touch tracking |
+| 8 | auto tracking |
+| 9 | smart adjustment (keeps the head centred) |
+| 10 | forced portrait |
+| 11 | full privacy |
 | 12 | vertical mirror |
 
 Bits 3 and 12 together are a 180° rotation. The tested unit shipped with
-`0x11c8`, with both mirror bits set, which is why its image looked upside down out of
+`0x11c8` (bits 3, 6, 7, 8, 12), which is why its image looked upside down out of
 the box.
 
-### Modes
+### Mode struct
 
-Byte 0 of unit 9 selector 2 is the mode id, byte 1 a per-mode flag:
+Unit 9 selector 2 is a 61-byte struct, laid out as the vendor app's
+`setVideoMode` builds it:
 
-| Mode | Id | Flag |
-|---|---:|---:|
-| off | `00` | `00` |
-| tracking | `01` | `00` |
-| whiteboard | `04` | `00` |
-| overhead | `05` | `03` |
-| DeskView | `06` | `10` |
+| Offset | Content |
+|---:|---|
+| 0 | mode id: `00` off, `01` tracking, `04` whiteboard, `05` overhead, `06` DeskView |
+| 1 | mode flag |
+| 2–37 | whiteboard corners |
+| 38–41 | two words `0xffff` (read back as `ff 7f`) |
+| 42–49 | two dwords `0x0e1a` |
+| 52–53 | camera pitch in 0.1°, signed |
+| 54 | flags |
 
-The selector is 61 bytes long; `link2c` writes the first two and zeroes the
-rest. What the other bytes hold is still unknown.
+Pitch is −45.0° by default. For DeskView the app sends the live pitch the camera
+itself reports in the same field, and the perspective correction is built on
+it. Sending only the first two bytes, as early versions of `link2c` did, zeroes
+all of this.
+
+Whiteboard mode is left out of the tools.
 
 ## Dangerous writes
 
@@ -134,6 +153,13 @@ Windows controller found it instead, without ever running the app.
 Tools: `strings`, `objdump -D -b binary -m i386:x86-64 -M intel`, `dd`, numpy and
 a hand-written protobuf parser. No Ghidra, no IDA.
 
+### Mapping the rest
+
+The remaining features went faster: function bounds from `.pdata`, thunks
+resolved through the `WinUVCCameraExtendController` vtable, then the GUID and
+`KSPROPERTY.Id` in each implementation. Feature names come from the app's UI
+strings.
+
 ### Flip detector
 
 `research/flipcheck.py` compares the last frame of each test phase with the
@@ -152,6 +178,20 @@ Check `lsusb -d 2e1a:4c03 && [ -e /dev/video0 ]` before and after every write to
 an unknown selector, and stop the moment the device is gone. The first sweep did
 not, lost the camera on selector 17 and kept writing blind for ten more
 selectors.
+
+## AI tracking
+
+Tracking runs on the camera. The models shipped with the vendor app (RVM, DPT,
+ByteEffects) are virtual camera effects: background, bokeh, beautification.
+
+Weak tracking out of the box had two causes:
+
+- **Auto Framing (bit 0) was off.** Framing and following a person only work
+  with it on, and the factory value has it cleared. At 1.0× zoom there is also
+  no room to move the crop.
+- **Group tracking was selected** (unit 10 selector 26).
+
+Still open: single vs. group tracking needs testing with a person in frame.
 
 ## GUI preview
 

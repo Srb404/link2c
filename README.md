@@ -4,14 +4,15 @@
 ![Python](https://img.shields.io/badge/Python-GTK4%20%2F%20libadwaita-3776AB?logo=python&logoColor=white)
 ![Linux](https://img.shields.io/badge/Linux-V4L2-FCC624?logo=linux&logoColor=black)
 
-Native Linux control for the Insta360 Link 2C webcam, which ships only with a Windows and macOS app. The camera's AI features sit behind UVC extension units; their selectors were mapped by reading the vendor's Windows controller (strings, RTTI vtables) instead of blindly sweeping values.
+Native Linux control for the Insta360 Link 2C webcam, which ships only with a Windows and macOS app. The camera's AI features sit behind UVC extension units; their selectors were mapped by reading the vendor's Windows controller (strings, RTTI vtables, `.pdata` function bounds) instead of blindly sweeping values.
 
 ---
 
 ## Features
 
-- **Modes:** off, AI tracking, whiteboard, overhead and DeskView
-- **Mirror:** horizontal and vertical, done by the camera itself, so it applies in every app
+- **Modes:** off, AI tracking, overhead and DeskView, sent as the same 61-byte struct the vendor app uses
+- **Tracking:** auto framing, framing (head, half body, full body), tracking speed, smart adjustment
+- **Image:** HDR, horizontal and vertical mirror, horizontal correction, plus the standard V4L2 controls
 - **Panel:** GTK4/libadwaita window with a live preview (modes only work while the camera streams); changes are saved to the cameractrls preset restored on replug
 - **Recovery:** `link2c-recover` brings the camera back from firmware-update mode without unplugging it
 
@@ -33,8 +34,9 @@ No root is needed: the tools only open the video device, which systemd-logind gr
 make install            # link2c, link2c-gui, link2c-recover to ~/.local/bin
 
 link2c info
-link2c mode deskview
-link2c mirror h on
+link2c mode track
+link2c framing half
+link2c feature hdr on
 link2c-gui
 ```
 
@@ -46,11 +48,11 @@ Three writes switch the camera into Ambarella firmware-update mode: unit 9 selec
 
 ## Notes
 
-`NOTES.md` holds the selector map and the reverse-engineering method. `research/` keeps the scripts used to work out the protocol.
+`NOTES.md` holds the full selector map, the mode struct layout and the reverse-engineering method. `research/` keeps the scripts used along the way.
 
 ## Disclaimer
 
-This is an unofficial tool, not affiliated with or endorsed by Insta360. It writes undocumented vendor controls; some of them put the camera into firmware-update mode. Use it at your own risk.
+This is an unofficial tool, not affiliated with or endorsed by Insta360. It writes undocumented vendor controls; some of them put the camera into firmware-update mode (see Safety). Use it at your own risk.
 
 ## License
 

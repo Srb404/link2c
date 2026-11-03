@@ -48,14 +48,21 @@
 #include <linux/usb/video.h>
 
 #define XU_MAIN        9   /* main vendor unit */
-#define SEL_FLAGS     27   /* 2-byte bitfield of feature toggles */
+#define XU_AUX        10   /* second vendor unit */
+#define SEL_FLAGS     27   /* 2-byte bitfield of feature toggles, see below */
+#define BIT_AUTOFRAME  0   /* auto framing; composition only applies with it */
+#define BIT_HDR        2
 #define BIT_MIRROR_H   3   /* horizontal mirror */
 #define BIT_USB_MODE   5   /* DO NOT SET: drops to firmware-update mode */
+#define BIT_STARTUP    6   /* camera keeps its settings across power-up */
+#define BIT_SMART      9   /* "smart adjustment": keeps the head centred */
 #define BIT_MIRROR_V  12   /* vertical mirror */
-#define SEL_MODE       2   /* byte 0 = mode id, byte 1 = mode flag */
+#define SEL_MODE       2   /* 61 bytes, see mode_set */
 #define SEL_SERIAL    12   /* 32 bytes, ASCII */
 #define SEL_RESET     14   /* 1 byte, SET only */
+#define SEL_SPEED     18   /* 1 byte: 0=fast 1=normal 2=slow */
 #define SEL_FRAMING   19   /* 1 byte: 1=head 2=half 3=full */
+#define SEL_LEVEL     28   /* unit 10, 25 bytes: byte[0]=horizontal correction */
 
 /* The by-id link survives other cameras (or v4l2loopback) taking video0. */
 #define DEV_BY_ID "/dev/v4l/by-id/usb-Insta360_Insta360_Link_2C-video-index0"
@@ -149,18 +156,46 @@ static void scan(int fd)
     }
 }
 
+/*
+ * The mode selector is a 61-byte struct, not a mode byte. The vendor app
+ * (setVideoMode, read from its binary) fills it like this for the 2C:
+ *   [0]      mode id
+ *   [2..37]  whiteboard corners (unused here)
+ *   [38..41] two words, 0xffff = unset (the camera reads them back clamped)
+ *   [42..49] two dwords, both 0x0e1a
+ *   [52..53] camera pitch in 0.1 degree, signed; the app sends -45.0 by
+ *            default and, for deskview, the live pitch the camera itself
+ *            reports in this same field - the perspective fix is built on it
+ * Writing just two bytes and zeros after them used to zero all of that.
+ */
+#define MODE_LEN    61
+#define MODE_PITCH  52
+
 static int mode_set(int fd, const char *name)
 {
     static const struct { const char *n; unsigned char id, flag; } modes[] = {
         { "off",        0x00, 0x00 },
         { "track",      0x01, 0x00 },
-        { "whiteboard", 0x04, 0x00 },
         { "overhead",   0x05, 0x03 },
         { "deskview",   0x06, 0x10 },
     };
     for (unsigned i = 0; i < sizeof modes / sizeof *modes; i++) {
         if (strcmp(modes[i].n, name)) continue;
-        unsigned char v[2] = { modes[i].id, modes[i].flag };
+
+        unsigned char cur[MODE_LEN] = { 0 };
+        int have = xu_get(fd, XU_MAIN, SEL_MODE, cur, sizeof cur) == MODE_LEN;
+        short pitch = have ? (short)(cur[MODE_PITCH] | (cur[MODE_PITCH + 1] << 8)) : 0;
+        if (!have || modes[i].id != 0x06 || pitch == 0)
+            pitch = -450;
+
+        unsigned char v[MODE_LEN] = { 0 };
+        v[0] = modes[i].id;
+        v[1] = modes[i].flag;
+        memset(v + 38, 0xff, 4);
+        v[42] = v[46] = 0x1a;
+        v[43] = v[47] = 0x0e;
+        v[MODE_PITCH] = pitch & 0xff;
+        v[MODE_PITCH + 1] = (pitch >> 8) & 0xff;
         if (xu_set(fd, XU_MAIN, SEL_MODE, v, sizeof v) < 0) return 1;
 
         /* The mode byte needs a moment to settle before it reads true. */
@@ -181,7 +216,7 @@ static int mode_set(int fd, const char *name)
                             "  tracking additionally needs a person in frame.\n", dev_path);
         return 1;
     }
-    fprintf(stderr, "unknown mode '%s' (off track whiteboard overhead deskview)\n", name);
+    fprintf(stderr, "unknown mode '%s' (off track overhead deskview)\n", name);
     return 2;
 }
 
@@ -197,6 +232,26 @@ static int framing_set(int fd, const char *name)
     return 0;
 }
 
+static const struct { const char *n; int bit; } features[] = {
+    { "autoframe", BIT_AUTOFRAME },
+    { "hdr",       BIT_HDR },
+    { "mirror-h",  BIT_MIRROR_H },
+    { "mirror-v",  BIT_MIRROR_V },
+    { "smart",     BIT_SMART },
+    { "startup",   BIT_STARTUP },
+};
+
+static int feature_word(int fd, unsigned *word)
+{
+    unsigned char b[8];
+    if (xu_get(fd, XU_MAIN, SEL_FLAGS, b, sizeof b) < 2) {
+        fprintf(stderr, "cannot read feature word\n");
+        return -1;
+    }
+    *word = b[0] | (b[1] << 8);
+    return 0;
+}
+
 static int parse_state(const char *state, int cur)
 {
     if (!strcmp(state, "on"))     return 1;
@@ -206,23 +261,25 @@ static int parse_state(const char *state, int cur)
     return -1;
 }
 
-/* Read-modify-write one mirror bit of the feature word, as the vendor app does. */
-static int mirror_set(int fd, const char *axis, const char *state)
+/* Read-modify-write one bit of the feature word, exactly as the vendor app does. */
+static int feature_set(int fd, const char *name, const char *state)
 {
-    int bit;
-    if (!strcmp(axis, "h")) bit = BIT_MIRROR_H;
-    else if (!strcmp(axis, "v")) bit = BIT_MIRROR_V;
-    else { fprintf(stderr, "axis must be h or v\n"); return 2; }
-
-    unsigned char b[8];
-    if (xu_get(fd, XU_MAIN, SEL_FLAGS, b, sizeof b) < 2) {
-        fprintf(stderr, "cannot read feature word\n");
-        return 1;
+    int bit = -1;
+    for (unsigned i = 0; i < sizeof features / sizeof *features; i++)
+        if (!strcmp(features[i].n, name)) bit = features[i].bit;
+    if (bit < 0) {
+        fprintf(stderr, "unknown feature '%s' (", name);
+        for (unsigned i = 0; i < sizeof features / sizeof *features; i++)
+            fprintf(stderr, "%s%s", i ? " " : "", features[i].n);
+        fprintf(stderr, ")\n");
+        return 2;
     }
-    unsigned word = b[0] | (b[1] << 8);
+
+    unsigned word;
+    if (feature_word(fd, &word) < 0) return 1;
     int cur = !!(word & (1u << bit));
     if (!state) {
-        printf("mirror %s: %s\n", axis, cur ? "on" : "off");
+        printf("%s: %s\n", name, cur ? "on" : "off");
         return 0;
     }
     int on = parse_state(state, cur);
@@ -233,8 +290,41 @@ static int mirror_set(int fd, const char *axis, const char *state)
     unsigned char out[2] = { word & 0xff, (word >> 8) & 0xff };
     if (xu_set(fd, XU_MAIN, SEL_FLAGS, out, 2) < 0) return 1;
 
-    printf("mirror %s -> %s (word 0x%04x)\n", axis, on ? "on" : "off", word);
-    printf("restart the stream for it to take effect\n");
+    printf("%s -> %s (word 0x%04x)\n", name, on ? "on" : "off", word);
+    if (bit == BIT_MIRROR_H || bit == BIT_MIRROR_V)
+        printf("restart the stream for it to take effect\n");
+    return 0;
+}
+
+static int speed_set(int fd, const char *name)
+{
+    static const char *names[] = { "fast", "normal", "slow" };
+    for (unsigned char v = 0; v < 3; v++) {
+        if (strcmp(names[v], name)) continue;
+        if (xu_set(fd, XU_MAIN, SEL_SPEED, &v, 1) < 0) return 1;
+        printf("tracking speed '%s' set\n", name);
+        return 0;
+    }
+    fprintf(stderr, "unknown speed '%s' (fast normal slow)\n", name);
+    return 2;
+}
+
+static int level_set(int fd, const char *state)
+{
+    unsigned char b[32];
+    if (xu_get(fd, XU_AUX, SEL_LEVEL, b, sizeof b) < 1) {
+        fprintf(stderr, "cannot read horizontal correction\n");
+        return 1;
+    }
+    if (!state) {
+        printf("level: %s\n", b[0] ? "on" : "off");
+        return 0;
+    }
+    int on = parse_state(state, b[0]);
+    if (on < 0) return 2;
+    unsigned char v = on;
+    if (xu_set(fd, XU_AUX, SEL_LEVEL, &v, 1) < 0) return 1;
+    printf("level -> %s\n", on ? "on" : "off");
     return 0;
 }
 
@@ -252,7 +342,6 @@ static int info(int fd)
         switch (b[0]) {
         case 0x00: m = "off";        break;
         case 0x01: m = "track";      break;
-        case 0x04: m = "whiteboard"; break;
         case 0x05: m = "overhead";   break;
         case 0x06: m = "deskview";   break;
         case 0xff: m = "none (no active stream)"; break;
@@ -265,7 +354,20 @@ static int info(int fd)
         printf("mirror : h=%s v=%s (word 0x%04x)\n",
                (w & (1u << BIT_MIRROR_H)) ? "on" : "off",
                (w & (1u << BIT_MIRROR_V)) ? "on" : "off", w);
+        printf("flags  :");
+        for (unsigned i = 0; i < sizeof features / sizeof *features; i++)
+            if (features[i].bit != BIT_MIRROR_H && features[i].bit != BIT_MIRROR_V)
+                printf(" %s=%s", features[i].n,
+                       (w & (1u << features[i].bit)) ? "on" : "off");
+        putchar('\n');
     }
+    n = xu_get(fd, XU_MAIN, SEL_SPEED, b, sizeof b);
+    if (n > 0)
+        printf("speed  : %s (0x%02x)\n",
+               b[0] == 0 ? "fast" : b[0] == 1 ? "normal" : b[0] == 2 ? "slow" : "?", b[0]);
+    n = xu_get(fd, XU_AUX, SEL_LEVEL, b, sizeof b);
+    if (n > 0)
+        printf("level  : %s\n", b[0] ? "on" : "off");
     n = xu_get(fd, XU_MAIN, SEL_FRAMING, b, sizeof b);
     if (n > 0)
         printf("framing: %s (0x%02x)\n",
@@ -278,9 +380,13 @@ static void usage(const char *p)
     fprintf(stderr,
       "usage: %s <command> [args]        (device: $LINK_DEV, default the by-id link)\n\n"
       "  info                    serial, current mode and framing\n"
-      "  mode <name>             off | track | whiteboard | overhead | deskview\n"
-      "  framing <name>          head | half | full\n"
-      "  mirror <h|v> [state]    state on | off | toggle, none reports\n"
+      "  mode <name>             off | track | overhead | deskview\n"
+      "  framing <name>          head | half | full (needs autoframe on)\n"
+      "  speed <name>            tracking speed: fast | normal | slow\n"
+      "  feature <name> [state]  autoframe | hdr | smart | startup | mirror-h |\n"
+      "                          mirror-v; state on | off | toggle, none reports\n"
+      "  mirror <h|v> [state]    shorthand for feature mirror-h / mirror-v\n"
+      "  level [state]           horizontal correction (auto-levels the image)\n"
       "  reset                   pulse the recentre control\n"
       "  scan                    dump every XU selector (length, access, value)\n"
       "  get <unit> <sel>        read one selector\n"
@@ -318,8 +424,20 @@ int main(int argc, char **argv)
     else if (!strcmp(cmd, "info"))                  rc = info(fd);
     else if (!strcmp(cmd, "mode")    && argc == 3)  rc = mode_set(fd, argv[2]);
     else if (!strcmp(cmd, "framing") && argc == 3)  rc = framing_set(fd, argv[2]);
-    else if (!strcmp(cmd, "mirror")  && (argc == 3 || argc == 4))
-        rc = mirror_set(fd, argv[2], argc == 4 ? argv[3] : NULL);
+    else if (!strcmp(cmd, "speed")   && argc == 3)  rc = speed_set(fd, argv[2]);
+    else if (!strcmp(cmd, "feature") && (argc == 3 || argc == 4))
+        rc = feature_set(fd, argv[2], argc == 4 ? argv[3] : NULL);
+    else if (!strcmp(cmd, "mirror")  && (argc == 3 || argc == 4)) {
+        if (strcmp(argv[2], "h") && strcmp(argv[2], "v")) {
+            fprintf(stderr, "axis must be h or v\n"); rc = 2;
+        } else {
+            char name[16];
+            snprintf(name, sizeof name, "mirror-%s", argv[2]);
+            rc = feature_set(fd, name, argc == 4 ? argv[3] : NULL);
+        }
+    }
+    else if (!strcmp(cmd, "level")   && (argc == 2 || argc == 3))
+        rc = level_set(fd, argc == 3 ? argv[2] : NULL);
     else if (!strcmp(cmd, "reset")) {
         unsigned char one = 1;
         rc = xu_set(fd, XU_MAIN, SEL_RESET, &one, 1) < 0;
