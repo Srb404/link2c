@@ -47,11 +47,120 @@ POWER_LINE = [(1, "50_hz", "50 Hz"), (2, "60_hz", "60 Hz"), (0, "disabled", "Off
 PREVIEW_STEPS = (360, 540, 720, 900, 1080)
 
 MODES = [
-    ("off", "Normal", "No processing"),
-    ("track", "AI tracking", "Keeps the person in frame"),
-    ("deskview", "DeskView", "Desk view with perspective correction"),
-    ("overhead", "Overhead", "Document view"),
+    ("off", "Normal"),
+    ("track", "AI tracking"),
+    ("deskview", "DeskView"),
+    ("overhead", "Overhead"),
 ]
+
+CSS = """
+.preview { border-radius: 12px; }
+.winbtn { min-width: 28px; min-height: 28px; padding: 0; }
+toggle-group.modes { border-radius: 12px; }
+toggle-group.modes > toggle { border-radius: 9px; padding: 6px 0; font-size: 14px; }
+toggle-group.small > toggle { font-size: 13px; padding: 2px 6px; }
+.panel preferencesgroup > box > box.header label { font-size: 12px; opacity: 0.6; }
+.panel list.boxed-list { background-color: mix(@card_bg_color, @window_fg_color, 0.05); }
+.panel list.boxed-list > row { border-bottom: none; }
+.panel row > box.header { min-height: 40px; }
+/* Dividers sit above a row and start at the text: a hidden row then takes
+   its own line with it instead of leaving one under the row before. */
+.panel list.boxed-list > row:not(:first-child) > box.header,
+.panel list.boxed-list > row.button:not(:first-child) {
+    border-top: 1px solid alpha(currentColor, 0.1);
+}
+.panel switch:not(:checked) { background-color: alpha(currentColor, 0.3); }
+.panel scale { padding-left: 5px; padding-right: 5px; }
+.panel scale > trough > slider { min-width: 14px; min-height: 14px; margin: -5px; }
+.panel scale indicator { min-width: 1px; min-height: 3px; color: alpha(currentColor, 0.4); }
+"""
+
+# The language follows the locale until one is picked in the panel.
+LANG_FILE = os.path.expanduser("~/.config/link2c/lang")
+LANGS = [("en", "English"), ("pl", "Polski")]
+PL = {
+    "Off": "Wyłączona",
+    "Normal": "Zwykły",
+    "AI tracking": "Śledzenie",
+    "Overhead": "Z góry",
+    "Head": "Głowa",
+    "Half body": "Półpostać",
+    "Full body": "Cała sylwetka",
+    "Fast": "Szybko",
+    "speed:Normal": "Normalnie",     # the mode "Normal" reads differently
+    "Slow": "Wolno",
+    "Preview: holds the stream, modes need it":
+        "Podgląd: trzyma strumień, bez niego tryby nie działają",
+    "Tracking": "Kadrowanie",
+    "framing:Off": "Wyłączony",
+    "Framing": "Autokadr",
+    "Speed": "Prędkość",
+    "Smart adjustment": "Centrowanie głowy",
+    "Auto tracking": "Automatyczne śledzenie",
+    "One-touch tracking": "Śledzenie dotykiem",
+    "Orientation": "Orientacja",
+    "Horizontal mirror": "Odbicie poziome",
+    "Vertical mirror": "Odbicie pionowe",
+    "Horizontal correction": "Korekta pozioma",
+    "Forced portrait": "Wymuszony pion",
+    "View": "Kadr",
+    "Zoom": "Przybliżenie",
+    "Pan": "Obrót poziomy",
+    "Tilt": "Obrót pionowy",
+    "Center view": "Wyśrodkuj kadr",
+    "Image": "Obraz",
+    "Brightness": "Jasność",
+    "Contrast": "Kontrast",
+    "Saturation": "Nasycenie",
+    "Hue": "Odcień",
+    "Sharpness": "Ostrość",
+    "Auto white balance": "Auto balans bieli",
+    "Temperature": "Temperatura",
+    "Autofocus": "Autofokus",
+    "Manual focus": "Ostrość ręczna",
+    "Restore defaults": "Przywróć domyślne",
+    "Power line frequency": "Częstotliwość sieci",
+    "Stream": "Strumień",
+    "Resolution": "Rozdzielczość",
+    "Frame rate": "Klatki na sekundę",
+    "Language": "Język",
+    "could not read from the camera": "nie udało się odczytać z kamery",
+    "this resolution limits the frame rate":
+        "ta rozdzielczość ogranicza liczbę klatek",
+    "ffmpeg not found": "brak ffmpeg",
+    "camera is busy in another app": "kamera zajęta przez inny program",
+    "preview stopped": "podgląd przerwany",
+    "could not switch: {}": "nie udało się przełączyć: {}",
+    "could not change mirror {}": "nie udało się zmienić odbicia {}",
+    "could not change framing": "nie udało się zmienić kadrowania",
+    "could not enable '{}'": "nie udało się włączyć „{}”",
+    ": the camera sees no one in frame": ": kamera nie widzi osoby w kadrze",
+    ": no active stream": ": brak aktywnego strumienia",
+    "{} not found in PATH": "brakuje {} w PATH",
+    "{} not found": "nie ma {}",
+}
+
+
+def load_lang():
+    try:
+        with open(LANG_FILE) as f:
+            lang = f.read().strip()
+        if lang in dict(LANGS):
+            return lang
+    except OSError:
+        pass
+    env = os.environ
+    locale = env.get("LC_ALL") or env.get("LC_MESSAGES") or env.get("LANG") or ""
+    return "pl" if locale.startswith("pl") else "en"
+
+
+LANG = load_lang()
+
+
+def tr(text, context=""):
+    if LANG != "pl":
+        return text
+    return PL.get(context + text) or PL.get(text, text)
 
 FRAMINGS = [("head", "Head"), ("half", "Half body"), ("full", "Full body")]
 SPEEDS = [("fast", "Fast"), ("normal", "Normal"), ("slow", "Slow")]
@@ -352,23 +461,13 @@ class Window(Adw.ApplicationWindow):
         self.formats = list_formats(DEV)
         self.busy = False
         self.streaming = False
-        self._base_status = "starting preview…"
         self._pending = {}
         self.auto_rows = {}
         self.feature_rows = {}
         self._syncing = False
         self.mode_key = None
 
-        toolbar = Adw.ToolbarView()
-        header = Adw.HeaderBar()
-        self.preview_btn = Gtk.ToggleButton(
-            icon_name="video-display-symbolic", active=True,
-            tooltip_text="Preview: holds the stream, modes need it")
-        self.preview_btn.connect("toggled", self.on_preview_toggled)
-        header.pack_end(self.preview_btn)
-        self.spinner = Gtk.Spinner()
-        header.pack_end(self.spinner)
-        toolbar.add_top_bar(header)
+        self.image_rows = []
 
         split = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
 
@@ -378,87 +477,118 @@ class Window(Adw.ApplicationWindow):
         left.set_margin_bottom(12)
         left.set_margin_start(12)
         left.set_margin_end(6)
-        frame = Gtk.Frame()
-        frame.add_css_class("view")
-        frame.set_hexpand(True)
-        frame.set_vexpand(True)
+        # The frame holds the picture at the stream's aspect, so the rounded
+        # corners clip the image itself and no letterbox is drawn around it.
+        self.aspect = Gtk.AspectFrame(ratio=16 / 9, obey_child=False)
+        self.aspect.set_hexpand(True)
+        self.aspect.set_vexpand(True)
         self.preview = Preview(DEV, self.on_preview_state)
-        frame.set_child(self.preview)
-        left.append(frame)
-        self.status = Gtk.Label(xalign=0)
+        self.preview.add_css_class("preview")
+        self.preview.set_overflow(Gtk.Overflow.HIDDEN)
+        self.aspect.set_child(self.preview)
+        left.append(self.aspect)
+        self.status = Gtk.Label(xalign=0, visible=False)
         self.status.add_css_class("dim-label")
         self.status.add_css_class("caption")
         left.append(self.status)
         split.append(left)
 
-        scroller = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER)
-        scroller.set_size_request(380, -1)
-        panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=14)
-        panel.set_margin_top(12)
+        # There is no header bar: its height goes to the picture, and the
+        # window buttons sit on top of the panel instead.
+        side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.bar = Gtk.Box(spacing=6, halign=Gtk.Align.END)
+        self.bar.set_margin_top(12)
+        self.bar.set_margin_start(6)
+        self.bar.set_margin_end(12)
+        self.spinner = Gtk.Spinner()
+        self.bar.append(self.spinner)
+        self.panel_btn = Gtk.ToggleButton(
+            icon_name="sidebar-show-right-symbolic", active=True)
+        self.panel_btn.connect("toggled", self.on_panel_toggled)
+        self.preview_btn = Gtk.ToggleButton(
+            icon_name="video-display-symbolic", active=True,
+            tooltip_text=tr("Preview: holds the stream, modes need it"))
+        self.preview_btn.connect("toggled", self.on_preview_toggled)
+        self.close_btn = Gtk.Button(icon_name="window-close-symbolic")
+        self.close_btn.connect("clicked", lambda _b: self.close())
+        for btn in (self.panel_btn, self.preview_btn, self.close_btn):
+            btn.add_css_class("circular")
+            btn.add_css_class("winbtn")
+            self.bar.append(btn)
+        side.append(Gtk.WindowHandle(child=self.bar))
+
+        # EXTERNAL: the wheel still scrolls, but no scrollbar is drawn.
+        self.scroller = Gtk.ScrolledWindow(
+            hscrollbar_policy=Gtk.PolicyType.NEVER,
+            vscrollbar_policy=Gtk.PolicyType.EXTERNAL, vexpand=True)
+        self.scroller.set_size_request(340, -1)
+        self.scroller.set_hexpand(False)    # the rows inside would claim half the window
+        panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        panel.add_css_class("panel")
+        panel.set_margin_top(10)
         panel.set_margin_bottom(12)
         panel.set_margin_start(6)
         panel.set_margin_end(12)
-        scroller.set_child(panel)
-        split.append(scroller)
+        self.scroller.set_child(panel)
+        side.append(self.scroller)
+        split.append(side)
 
         panel.append(self._build_modes())
         panel.append(self._build_tracking())
-        panel.append(self._build_stream())
-        panel.append(self._build_mirror())
-        panel.append(self._build_view())
         panel.append(self._build_image())
+        panel.append(self._build_view())
+        panel.append(self._build_orientation())
+        panel.append(self._build_stream())
+        panel.append(self._build_language())
 
-        toolbar.set_content(split)
-        self.set_content(toolbar)
+        self.set_content(split)
 
         self.preview.start()
         self.refresh_state()
 
     # ---------------- panel sections ----------------
 
-    def _group(self, title, description=None):
-        g = Adw.PreferencesGroup(title=title)
-        if description:
-            g.set_description(description)
-        return g
+    def _say(self, error=""):
+        """The status line exists for failures only; success is visible as is."""
+        self.status.set_label(error)
+        self.status.set_visible(bool(error))
+
+    def _group(self, title):
+        return Adw.PreferencesGroup(title=tr(title))
 
     def _build_modes(self):
-        g = self._group("Mode", "Needs an active stream from the camera")
-        self.mode_rows = {}
-        self.mode_check = None
-        for key, label, sub in MODES:
-            row = Adw.ActionRow(title=label, subtitle=sub)
-            check = Gtk.CheckButton()
-            if self.mode_check is None:
-                self.mode_check = check
-            else:
-                check.set_group(self.mode_check)
-            check.connect("toggled", self.on_mode_toggled, key)
-            row.add_prefix(check)
-            row.set_activatable_widget(check)
-            g.add(row)
-            self.mode_rows[key] = (row, check)
-        return g
+        self.mode_group = Adw.ToggleGroup(homogeneous=True)
+        self.mode_group.add_css_class("modes")
+        for key, label in MODES:
+            self.mode_group.add(Adw.Toggle(name=key, label=tr(label)))
+        self.mode_group.connect("notify::active-name", self.on_mode_changed)
+        return self.mode_group
 
     def _build_tracking(self):
         g = self._group("Tracking")
-        self._feature_row(g, "autoframe", "Auto framing")
-        self.framing_row = Adw.ComboRow(title="Framing")
-        self.framing_row.set_model(
-            Gtk.StringList.new([label for _, label in FRAMINGS]))
+        # Auto framing and the framing choice are one control: the camera
+        # ignores the choice while auto framing is off.
+        self.framing_row = Adw.ComboRow(title=tr("Framing"))
+        self.framing_row.set_model(Gtk.StringList.new(
+            [tr("Off", "framing:")] + [tr(label) for _, label in FRAMINGS]))
         self.framing_row.connect("notify::selected", self.on_framing_changed)
         g.add(self.framing_row)
-        self.speed_row = Adw.ComboRow(title="Speed")
-        self.speed_row.set_model(
-            Gtk.StringList.new([label for _, label in SPEEDS]))
-        self.speed_row.connect("notify::selected", self.on_speed_changed)
-        g.add(self.speed_row)
+        self.speed_group = Adw.ToggleGroup(valign=Gtk.Align.CENTER, can_shrink=False)
+        self.speed_group.add_css_class("small")
+        for key, label in SPEEDS:
+            self.speed_group.add(Adw.Toggle(name=key, label=tr(label, "speed:")))
+        self.speed_group.connect("notify::active-name", self.on_speed_changed)
+        row = Adw.ActionRow(title=tr("Speed"))
+        row.add_suffix(self.speed_group)
+        g.add(row)
         self._feature_row(g, "smart", "Smart adjustment")
+        self._feature_row(g, "autotrack", "Auto tracking")
+        self._feature_row(g, "onetouch", "One-touch tracking")
         return g
 
     def _feature_row(self, group, name, title):
         """A switch backed by `link2c feature <name>` (or `level`)."""
-        row = Adw.SwitchRow(title=title)
+        row = Adw.SwitchRow(title=tr(title))
         row.connect("notify::active", self.on_feature, name)
         group.add(row)
         self.feature_rows[name] = row
@@ -470,38 +600,35 @@ class Window(Adw.ApplicationWindow):
         state = "on" if row.get_active() else "off"
         cmd = ["link2c", "level", state] if name == "level" else \
               ["link2c", "feature", name, state]
-        self.update_framing_sensitivity()
 
         def done(ok, _out):
             if not ok:
-                self._base_status = f"could not switch: {row.get_title()}"
-                self.status.set_label(self._base_status)
+                self._say(tr("could not switch: {}").format(row.get_title()))
                 self.refresh_state()
         run_bg(cmd, done)
 
-    def on_speed_changed(self, row, _param):
-        if self._syncing:
+    def on_speed_changed(self, group, _param):
+        if self._syncing or not group.get_active_name():
             return
-        run_bg(["link2c", "speed", SPEEDS[row.get_selected()][0]])
+        run_bg(["link2c", "speed", group.get_active_name()])
 
-    def _build_mirror(self):
-        g = self._group(
-            "Orientation",
-            "The camera mirrors the image itself, so it applies in OBS and calls too")
+    def _build_orientation(self):
+        g = self._group("Orientation")
         self.mirror_rows = {}
         for axis, title in (("h", "Horizontal mirror"), ("v", "Vertical mirror")):
-            row = Adw.SwitchRow(title=title)
+            row = Adw.SwitchRow(title=tr(title))
             row.connect("notify::active", self.on_mirror, axis)
             g.add(row)
             self.mirror_rows[axis] = row
         self._feature_row(g, "level", "Horizontal correction")
+        self._feature_row(g, "portrait", "Forced portrait")
         return g
 
     def on_mirror(self, row, _param, axis):
         if self._syncing:
             return
         state = "on" if row.get_active() else "off"
-        self.set_busy(True, f"mirror {axis} -> {state}…")
+        self.set_busy(True)
 
         def work():
             ok, out = run(["link2c", "mirror", axis, state])
@@ -512,19 +639,15 @@ class Window(Adw.ApplicationWindow):
     def mirror_done(self, ok, out, axis, state):
         self.set_busy(False)
         if not ok:
-            self._base_status = f"could not change mirror {axis}"
-            self.status.set_label(self._base_status)
+            self._say(tr("could not change mirror {}").format(axis))
             return False
-        self._base_status = f"mirror {axis}: {state}"
-        self.status.set_label(self._base_status)
+        self._say()
         # The camera only picks this up when a stream starts, so cycle ours.
         self.preview.restart()
         return False
 
     def _build_stream(self):
-        g = self._group(
-            "Stream",
-            "Applies to the preview, other apps negotiate their own format")
+        g = self._group("Stream")
         self._stream_ready = False
 
         self.fmt_row = Adw.ComboRow(title="Format")
@@ -532,18 +655,18 @@ class Window(Adw.ApplicationWindow):
         self.fmt_row.connect("notify::selected", self.on_format_changed)
         g.add(self.fmt_row)
 
-        self.res_row = Adw.ComboRow(title="Resolution")
+        self.res_row = Adw.ComboRow(title=tr("Resolution"))
         self.res_row.connect("notify::selected", self.on_res_changed)
         g.add(self.res_row)
 
-        self.fps_row = Adw.ComboRow(title="Frame rate")
+        self.fps_row = Adw.ComboRow(title=tr("Frame rate"))
         self.fps_row.connect("notify::selected", self.on_fps_changed)
         g.add(self.fps_row)
 
         if not self.formats:
             for row in (self.fmt_row, self.res_row, self.fps_row):
                 row.set_sensitive(False)
-            self.fmt_row.set_subtitle("could not read from the camera")
+            self.fmt_row.set_subtitle(tr("could not read from the camera"))
             return g
 
         # Default to 1080p30 MJPEG when the camera offers it.
@@ -584,7 +707,8 @@ class Window(Adw.ApplicationWindow):
         self.fps_row.handler_unblock_by_func(self.on_fps_changed)
         # 4K tops out below 60, so say why the choice shrank.
         self.fps_row.set_subtitle(
-            "" if len(self.fpses) > 3 else "this resolution limits the frame rate")
+            "" if len(self.fpses) > 3
+            else tr("this resolution limits the frame rate"))
 
     def on_format_changed(self, *_a):
         if not getattr(self, "_stream_ready", False):
@@ -609,24 +733,23 @@ class Window(Adw.ApplicationWindow):
             return
         size = self.sizes[self.res_row.get_selected()]
         fps = self.fpses[self.fps_row.get_selected()]
-        self._base_status = f"stream: {fourcc} {size[0]}×{size[1]} @ {fps} fps"
-        self.status.set_label(self._base_status)
+        self.aspect.set_ratio(size[0] / size[1])
         self.preview.set_format(fourcc, size, fps)
 
     def _build_view(self):
         g = self._group("View")
         self.zoom_row = self._slider_row(
-            g, "Zoom", "zoom_absolute", fmt=lambda v: f"{v/100:.1f}×")
+            g, "Zoom", "zoom_absolute", fmt=self._zoom)
         self.pan_row = self._slider_row(g, "Pan", "pan_absolute",
                                         fmt=self._deg)
         self.tilt_row = self._slider_row(g, "Tilt", "tilt_absolute",
                                          fmt=self._deg)
 
-        row = Adw.ActionRow(title="Center view")
-        btn = Gtk.Button(label="Center", valign=Gtk.Align.CENTER)
-        btn.connect("clicked", self.on_center)
-        row.add_suffix(btn)
-        g.add(row)
+        self.center_row = Adw.ButtonRow(title=tr("Center view"))
+        self.center_row.connect("activated", self.on_center)
+        g.add(self.center_row)
+        if self.zoom_row:
+            self.update_pan_hint(int(self.zoom_row.scale.get_value()))
         return g
 
     def _build_image(self):
@@ -638,74 +761,160 @@ class Window(Adw.ApplicationWindow):
             ("Hue", "hue"),
             ("Sharpness", "sharpness"),
         ]:
-            self._slider_row(g, title, name)
+            self.image_rows.append(self._slider_row(g, title, name))
         self._feature_row(g, "hdr", "HDR")
 
         self.wb_temp_row = None
         if self.v4l2.has("white_balance_automatic"):
             self._auto_row(g, "Auto white balance", "white_balance_automatic")
             self.wb_temp_row = self._slider_row(
-                g, "Color temperature", "white_balance_temperature",
+                g, "Temperature", "white_balance_temperature",
                 fmt=lambda v: f"{v} K")
 
         self.focus_row = None
         if self.v4l2.has("focus_automatic_continuous"):
             self._auto_row(g, "Autofocus", "focus_automatic_continuous")
             self.focus_row = self._slider_row(g, "Manual focus", "focus_absolute")
-        self.update_auto_sensitivity()
+        self.image_rows += [self.wb_temp_row, self.focus_row]
+        self.image_rows = [row for row in self.image_rows if row]
+        self.update_manual_rows()
 
         if self.v4l2.has("power_line_frequency"):
-            row = Adw.ComboRow(title="Power line frequency")
-            row.set_model(Gtk.StringList.new([lbl for _, _, lbl in POWER_LINE]))
+            row = Adw.ComboRow(title=tr("Power line frequency"))
+            row.set_model(Gtk.StringList.new([tr(lbl) for _, _, lbl in POWER_LINE]))
             cur = self.v4l2.ctrls["power_line_frequency"]["value"]
             row.set_selected(next(
                 (i for i, (v, _, _) in enumerate(POWER_LINE) if v == cur), 0))
             row.connect("notify::selected", self.on_power_line)
             g.add(row)
+
+        reset = Adw.ButtonRow(title=tr("Restore defaults"))
+        reset.connect("activated", self.on_reset_image)
+        g.add(reset)
         return g
 
+    def on_reset_image(self, _row):
+        for ctrl, row in self.auto_rows.items():
+            row.set_active(bool(self.v4l2.ctrls[ctrl]["default"]))
+        # A manual value is refused while its auto is on, and one refusal
+        # fails the whole batched write, so hidden rows are left alone.
+        for row in self.image_rows:
+            if row.get_visible():
+                row.scale.set_value(row.default)
+
+    def _build_language(self):
+        g = Adw.PreferencesGroup()
+        row = Adw.ComboRow(title=tr("Language"))
+        row.set_model(Gtk.StringList.new([name for _, name in LANGS]))
+        row.set_selected([code for code, _ in LANGS].index(LANG))
+        row.connect("notify::selected", self.on_language)
+        g.add(row)
+        return g
+
+    def on_language(self, row, _param):
+        """Every label is set at build time, so switching rebuilds the window."""
+        global LANG
+        LANG = LANGS[row.get_selected()][0]
+        os.makedirs(os.path.dirname(LANG_FILE), exist_ok=True)
+        with open(LANG_FILE, "w") as f:
+            f.write(LANG + "\n")
+
+        def rebuild():
+            self.preview.stop()     # frees the camera for the new window
+            self.get_application().open_window()
+            self.close()
+            return False
+        GLib.idle_add(rebuild)
+
     def _auto_row(self, group, title, ctrl):
-        row = Adw.SwitchRow(title=title)
+        row = Adw.SwitchRow(title=tr(title))
         row.set_active(bool(self.v4l2.ctrls[ctrl]["value"]))
         row.connect("notify::active", self.on_auto, ctrl)
         group.add(row)
         self.auto_rows[ctrl] = row
 
-    def update_auto_sensitivity(self):
+    def update_manual_rows(self):
         """Manual white balance and focus are ignored while their auto is on."""
         for ctrl, row in (("white_balance_automatic", self.wb_temp_row),
                           ("focus_automatic_continuous", self.focus_row)):
             if row and ctrl in self.auto_rows:
-                row.set_sensitive(not self.auto_rows[ctrl].get_active())
+                row.set_visible(not self.auto_rows[ctrl].get_active())
+
+    @staticmethod
+    def _zoom(v):
+        text = f"{v/100:.1f}×"
+        return text.replace(".", ",") if LANG == "pl" else text
 
     @staticmethod
     def _deg(v):
-        return f"{v/3600:+.0f}°"
+        deg = round(v / 3600)
+        return f"{deg:+d}°" if deg else "0°"
 
     def _slider_row(self, group, title, ctrl, fmt=None):
         if not self.v4l2.has(ctrl):
             return None
         info = self.v4l2.ctrls[ctrl]
-        row = Adw.ActionRow(title=title)
+        row = Adw.ActionRow(title=tr(title))
         scale = Gtk.Scale.new_with_range(
             Gtk.Orientation.HORIZONTAL, info["min"], info["max"],
             max(info["step"], 1))
-        scale.set_size_request(190, -1)
+        scale.set_size_request(130, -1)
         scale.set_draw_value(False)
+        scale.set_has_origin(False)
         scale.set_value(info["value"])
         scale.set_valign(Gtk.Align.CENTER)
-        label = Gtk.Label(label=(fmt or str)(info["value"]), width_chars=5,
-                          xalign=1)
-        label.add_css_class("dim-label")
-        label.add_css_class("numeric")
-        scale.connect("value-changed", self.on_slider, ctrl, label, fmt)
+        default = info["default"]
+        if info["min"] < default < info["max"]:
+            # One tick on each side keeps the trough centred in the row.
+            for pos in (Gtk.PositionType.TOP, Gtk.PositionType.BOTTOM):
+                scale.add_mark(default, pos, None)
+        click = Gtk.GestureClick()
+        click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        click.connect("pressed", self.on_slider_press, scale, default)
+        scale.add_controller(click)
+        label = None
+        if fmt:     # a bare control value says nothing, a unit does
+            # Before the scale, so every scale in the panel shares its edges,
+            # and only shown while the value moves.
+            label = Gtk.Label(label=fmt(info["value"]), xalign=1, opacity=0)
+            for cls in ("dim-label", "numeric", "caption"):
+                label.add_css_class(cls)
+            label.hide_id = 0
+            row.add_suffix(label)
         row.add_suffix(scale)
-        row.add_suffix(label)
+        scale.connect("value-changed", self.on_slider, ctrl, label, fmt)
         group.add(row)
         row.scale = scale
+        row.default = default
         return row
 
+    def on_slider_press(self, gesture, n_press, _x, _y, scale, default):
+        """Double click puts a slider back on its default."""
+        if n_press == 2:
+            # Claimed, or the scale would jump to the pointer right after.
+            gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+            scale.set_value(default)
+
+    def _hide_value(self, label):
+        label.hide_id = 0
+        label.set_opacity(0)
+        return False
+
     # ---------------- behaviour ----------------
+
+    def on_panel_toggled(self, btn):
+        """Collapsed, the panel is only its buttons, stacked in a strip."""
+        shown = btn.get_active()
+        self.scroller.set_visible(shown)
+        self.bar.set_orientation(Gtk.Orientation.HORIZONTAL if shown
+                                 else Gtk.Orientation.VERTICAL)
+        # Close stays in the window's corner either way.
+        if shown:
+            self.bar.reorder_child_after(self.spinner, None)
+            self.bar.reorder_child_after(self.close_btn, self.preview_btn)
+        else:
+            self.bar.reorder_child_after(self.close_btn, None)
+            self.bar.reorder_child_after(self.spinner, self.preview_btn)
 
     def on_preview_toggled(self, btn):
         if btn.get_active():
@@ -716,8 +925,7 @@ class Window(Adw.ApplicationWindow):
 
     def on_preview_state(self, live, msg):
         self.streaming = live
-        self._base_status = msg
-        self.status.set_label(msg)
+        self._say("" if live or msg == "preview off" else tr(msg))
         if not live and self.preview_btn.get_active() and msg != "preview off":
             self.preview_btn.set_active(False)
         self.update_mode_sensitivity()
@@ -725,36 +933,25 @@ class Window(Adw.ApplicationWindow):
 
     def update_mode_sensitivity(self):
         """Modes are dead without a stream, so say so instead of failing later."""
-        live = self.streaming
-        for row, _check in self.mode_rows.values():
-            row.set_sensitive(live)
-        self.update_framing_sensitivity()
-        text = self._base_status
-        if not live:
-            text += "  ·  modes need a stream (turn the preview on)"
-        self.status.set_label(text)
-
-    def update_framing_sensitivity(self):
-        """The camera ignores the framing choice unless auto framing is on."""
-        self.framing_row.set_sensitive(self.feature_rows["autoframe"].get_active())
+        self.mode_group.set_sensitive(self.streaming)
 
     def _select_mode(self, key):
-        """Tick a mode row without it firing a camera write."""
-        if key not in self.mode_rows:
+        """Press a mode button without it firing a camera write."""
+        if key not in dict(MODES):
             return
-        check = self.mode_rows[key][1]
-        check.handler_block_by_func(self.on_mode_toggled)
-        check.set_active(True)
-        check.handler_unblock_by_func(self.on_mode_toggled)
+        self.mode_group.handler_block_by_func(self.on_mode_changed)
+        self.mode_group.set_active_name(key)
+        self.mode_group.handler_unblock_by_func(self.on_mode_changed)
 
-    def on_mode_toggled(self, check, key):
-        if not check.get_active():
+    def on_mode_changed(self, group, _param):
+        key = group.get_active_name()
+        if not key:
             return
         if self.busy:
             # One mode change at a time; put the tick back where the camera is.
             GLib.idle_add(lambda: self._select_mode(self.mode_key) and False)
             return
-        self.set_busy(True, f"setting mode '{key}'…")
+        self.set_busy(True)
 
         def work():
             ok, out = run(["link2c", "mode", key])
@@ -766,34 +963,39 @@ class Window(Adw.ApplicationWindow):
         self.set_busy(False)
         if ok:
             self.mode_key = key
-            self._base_status = f"mode: {key}"
-            self.status.set_label(self._base_status)
-            self.update_framing_sensitivity()
+            self._say()
         else:
             hint = ""
             if key == "track" and "0xff" in out:
-                hint = ": the camera sees no one in frame"
+                hint = tr(": the camera sees no one in frame")
             elif "0xff" in out:
-                hint = ": no active stream"
-            self._base_status = f"could not enable '{key}'{hint}"
-            self.status.set_label(self._base_status)
+                hint = tr(": no active stream")
+            self._say(tr("could not enable '{}'").format(key) + hint)
             self.refresh_state()
         return False
 
     def on_framing_changed(self, row, _param):
         if self.busy:
             return
-        key, label = FRAMINGS[row.get_selected()]
+        pick = row.get_selected()
 
-        def done(ok, _out):
-            self._base_status = (f"framing: {label.lower()}" if ok
-                                 else "could not change framing")
-            self.status.set_label(self._base_status)
-        run_bg(["link2c", "framing", key], done)
+        def work():
+            ok, _out = run(["link2c", "feature", "autoframe", "on" if pick else "off"])
+            if ok and pick:
+                ok, _out = run(["link2c", "framing", FRAMINGS[pick - 1][0]])
+            GLib.idle_add(lambda: self._say(
+                "" if ok else tr("could not change framing")) and False)
+
+        threading.Thread(target=work, daemon=True).start()
 
     def on_slider(self, scale, ctrl, label, fmt):
         value = int(scale.get_value())
-        label.set_label((fmt or str)(value))
+        if label:
+            label.set_label(fmt(value))
+            label.set_opacity(1)
+            if label.hide_id:
+                GLib.source_remove(label.hide_id)
+            label.hide_id = GLib.timeout_add(1200, self._hide_value, label)
         self._pending[ctrl] = value
         if ctrl == "zoom_absolute":
             self.update_pan_hint(value)
@@ -815,11 +1017,9 @@ class Window(Adw.ApplicationWindow):
     def update_pan_hint(self, zoom):
         """Pan and tilt do nothing at 1x - the crop already fills the sensor."""
         usable = zoom > 100
-        for row in (self.pan_row, self.tilt_row):
-            if row is None:
-                continue
-            row.set_sensitive(usable)
-            row.set_subtitle("" if usable else "needs zoom")
+        for row in (self.pan_row, self.tilt_row, self.center_row):
+            if row is not None:
+                row.set_visible(usable)
 
     def on_center(self, _btn):
         for ctrl, row in (("pan_absolute", self.pan_row),
@@ -831,7 +1031,7 @@ class Window(Adw.ApplicationWindow):
 
     def on_auto(self, row, _param, ctrl):
         value = 1 if row.get_active() else 0
-        self.update_auto_sensitivity()
+        self.update_manual_rows()
         run_bg(["v4l2-ctl", "-d", DEV, f"--set-ctrl={ctrl}={value}"],
                lambda ok, _o: ok and save_preset({ctrl: value}))
 
@@ -840,14 +1040,12 @@ class Window(Adw.ApplicationWindow):
         run_bg(["v4l2-ctl", "-d", DEV, f"--set-ctrl=power_line_frequency={value}"],
                lambda ok, _o: ok and save_preset({"power_line_frequency": value}))
 
-    def set_busy(self, busy, msg=None):
+    def set_busy(self, busy):
         self.busy = busy
         if busy:
             self.spinner.start()
         else:
             self.spinner.stop()
-        if msg:
-            self.status.set_label(msg)
 
     def refresh_state(self):
         """Read back what the camera actually reports and mirror it."""
@@ -861,16 +1059,17 @@ class Window(Adw.ApplicationWindow):
         if not ok:
             return False
         m = re.search(r"^mode\s*:\s*(\w+)", out, re.MULTILINE)
-        if m and m.group(1) in self.mode_rows:
+        if m and m.group(1) in dict(MODES):
             self.mode_key = m.group(1)
             self._select_mode(self.mode_key)
         m = re.search(r"^framing\s*:\s*(\w+)", out, re.MULTILINE)
-        if m:
-            for i, (key, _) in enumerate(FRAMINGS):
-                if key == m.group(1):
-                    self.framing_row.handler_block_by_func(self.on_framing_changed)
-                    self.framing_row.set_selected(i)
-                    self.framing_row.handler_unblock_by_func(self.on_framing_changed)
+        keys = [k for k, _ in FRAMINGS]
+        pick = keys.index(m.group(1)) + 1 if m and m.group(1) in keys else 0
+        if not re.search(r"^flags\s*:.*\bautoframe=on", out, re.MULTILINE):
+            pick = 0
+        self.framing_row.handler_block_by_func(self.on_framing_changed)
+        self.framing_row.set_selected(pick)
+        self.framing_row.handler_unblock_by_func(self.on_framing_changed)
         m = re.search(r"^mirror\s*:\s*h=(\w+)\s+v=(\w+)", out, re.MULTILINE)
         self._syncing = True
         if m:
@@ -886,14 +1085,10 @@ class Window(Adw.ApplicationWindow):
         m = re.search(r"^speed\s*:\s*(\w+)", out, re.MULTILINE)
         keys = [k for k, _ in SPEEDS]
         if m and m.group(1) in keys:
-            self.speed_row.set_selected(keys.index(m.group(1)))
+            self.speed_group.set_active_name(m.group(1))
         self._syncing = False
-        m = re.search(r"^serial\s*:\s*(\S+)", out, re.MULTILINE)
-        if m:
-            self.set_title(f"Insta360 Link 2C — {m.group(1)}")
         if self.zoom_row:
             self.update_pan_hint(int(self.zoom_row.scale.get_value()))
-        self.update_framing_sensitivity()
         return False
 
 
@@ -902,16 +1097,26 @@ class App(Adw.Application):
         super().__init__(application_id="io.github.srb404.Link2C")
 
     def do_activate(self):
-        Window(self).present()
+        css = Gtk.CssProvider()
+        css.load_from_string(CSS)
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), css,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        self.open_window()
+
+    def open_window(self):
+        win = Window(self)
+        win.present()
+        win.set_focus(None)             # no focus ring on the first control
 
 
 def main():
     for tool in ("link2c", "v4l2-ctl"):
         if not shutil.which(tool):
-            print(f"{tool} not found in PATH")
+            print(tr("{} not found in PATH").format(tool))
             return 1
     if not os.path.exists(DEV):
-        print(f"{DEV} not found")
+        print(tr("{} not found").format(DEV))
         return 1
     return App().run(None)
 

@@ -55,7 +55,11 @@
 #define BIT_MIRROR_H   3   /* horizontal mirror */
 #define BIT_USB_MODE   5   /* DO NOT SET: drops to firmware-update mode */
 #define BIT_STARTUP    6   /* camera keeps its settings across power-up */
+#define BIT_ONETOUCH   7   /* one-touch tracking */
+#define BIT_AUTOTRACK  8   /* auto tracking */
 #define BIT_SMART      9   /* "smart adjustment": keeps the head centred */
+#define BIT_PORTRAIT  10   /* forced portrait */
+#define BIT_PRIVACY   11   /* full privacy */
 #define BIT_MIRROR_V  12   /* vertical mirror */
 #define SEL_MODE       2   /* 61 bytes, see mode_set */
 #define SEL_SERIAL    12   /* 32 bytes, ASCII */
@@ -239,6 +243,10 @@ static const struct { const char *n; int bit; } features[] = {
     { "mirror-v",  BIT_MIRROR_V },
     { "smart",     BIT_SMART },
     { "startup",   BIT_STARTUP },
+    { "onetouch",  BIT_ONETOUCH },
+    { "autotrack", BIT_AUTOTRACK },
+    { "portrait",  BIT_PORTRAIT },
+    { "privacy",   BIT_PRIVACY },
 };
 
 static int feature_word(int fd, unsigned *word)
@@ -383,7 +391,8 @@ static void usage(const char *p)
       "  mode <name>             off | track | overhead | deskview\n"
       "  framing <name>          head | half | full (needs autoframe on)\n"
       "  speed <name>            tracking speed: fast | normal | slow\n"
-      "  feature <name> [state]  autoframe | hdr | smart | startup | mirror-h |\n"
+      "  feature <name> [state]  autoframe | hdr | smart | startup | onetouch |\n"
+      "                          autotrack | portrait | privacy | mirror-h |\n"
       "                          mirror-v; state on | off | toggle, none reports\n"
       "  mirror <h|v> [state]    shorthand for feature mirror-h / mirror-v\n"
       "  level [state]           horizontal correction (auto-levels the image)\n"

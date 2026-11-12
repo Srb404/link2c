@@ -11,9 +11,9 @@ Native Linux control for the Insta360 Link 2C webcam, which ships only with a Wi
 ## Features
 
 - **Modes:** off, AI tracking, overhead and DeskView, sent as the same 61-byte struct the vendor app uses
-- **Tracking:** auto framing, framing (head, half body, full body), tracking speed, smart adjustment
-- **Image:** HDR, horizontal and vertical mirror, horizontal correction, plus the standard V4L2 controls
-- **Panel:** GTK4/libadwaita window with a live preview (modes only work while the camera streams); changes are saved to the cameractrls preset restored on replug
+- **Tracking:** auto framing, framing (head, half body, full body), tracking speed, smart adjustment, auto and one-touch tracking
+- **Image:** HDR, horizontal and vertical mirror, horizontal correction, forced portrait, full privacy, plus the standard V4L2 controls
+- **Panel:** GTK4/libadwaita window with a live preview (modes only work while the camera streams), in English or Polish; changes are saved to the cameractrls preset restored on replug
 - **Recovery:** `link2c-recover` brings the camera back from firmware-update mode without unplugging it
 
 ## Requirements
